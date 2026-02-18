@@ -1,38 +1,35 @@
 #include <stdio.h>
+#include <time.h>
 
-void oddEvenSort(int *arr, int n) {
-    for(int i=0; i<n; i++){
-        // Even phase
-        for(int j=0; j<n-1; j+=2){
-            if(arr[j] > arr[j+1]){
-                int tmp = arr[j];
-                arr[j] = arr[j+1];
-                arr[j+1] = tmp;
-            }
-        }
-        // Odd phase
-        for(int j=1; j<n-1; j+=2){
-            if(arr[j] > arr[j+1]){
-                int tmp = arr[j];
-                arr[j] = arr[j+1];
-                arr[j+1] = tmp;
+#define N 8
+
+// Serial odd-even transposition sort
+void oddEvenSort(int arr[], int n){
+    for(int phase = 0; phase < n; phase++){
+        // Even phase when phase%2==0, Odd phase when phase%2==1
+        for(int i = (phase % 2); i < n-1; i += 2){
+            if(arr[i] > arr[i+1]){
+                int tmp = arr[i];
+                arr[i] = arr[i+1];
+                arr[i+1] = tmp;
             }
         }
     }
 }
 
 int main() {
-    int arr[8] = {5, 3, 8, 1, 4, 7, 2, 6};
-    int n = 8;
+    int arr[N] = {5,2,8,3,1,6,4,7};
 
-    printf("Before sorting:\n");
-    for(int i=0;i<n;i++) printf("%d ", arr[i]);
+    clock_t start = clock();
+    oddEvenSort(arr, N);
+    clock_t end = clock();
+
+    printf("Sorted array: ");
+    for(int i=0;i<N;i++) printf("%d ", arr[i]);
     printf("\n");
 
-    oddEvenSort(arr, n);
+    double time_ms = (double)(end-start) * 1000 / CLOCKS_PER_SEC;
+    printf("Serial execution time: %f ms\n", time_ms);
 
-    printf("After sorting:\n");
-    for(int i=0;i<n;i++) printf("%d ", arr[i]);
-    printf("\n");
     return 0;
 }
