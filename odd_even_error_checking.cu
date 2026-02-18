@@ -67,9 +67,9 @@ int main() {
     int *h_arr = (int*)malloc(N * sizeof(int));
     int *h_serial = (int*)malloc(N * sizeof(int));
 
-    srand(time(NULL));
+    srand(time(NULL)); // Seed once
     for (int i = 0; i < N; i++) {
-        h_arr[i] = rand() % 100; // small numbers for easy reading
+        h_arr[i] = rand() % 100 + 1; // Random values 1-100
         h_serial[i] = h_arr[i];
     }
 
