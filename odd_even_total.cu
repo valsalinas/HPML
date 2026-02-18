@@ -3,15 +3,15 @@
 #include <cuda_runtime.h>
 #include <time.h>
 
-#define N 1024          // Number of elements to sort
-#define BLOCK_SIZE 128  // Threads per block (multiple of 32)
+#define N 32          // Start small for debugging
+#define BLOCK_SIZE 16 // Threads per block (must be ≤ N)
 
-// ---------------- Warmup kernel ----------------
+// Warmup kernel to remove first-launch overhead
 __global__ void warmup() {}
 
-// ---------------- Serial Odd-Even Sort ----------------
+// ====================== Serial Odd-Even Sort ======================
 void oddEvenSortSerial(int *arr, int n) {
-    for (int phase = 0; phase < n; ++phase) {
+    for (int phase = 0; phase < n; phase++) {
         int start = phase % 2;
         for (int i = start; i < n - 1; i += 2) {
             if (arr[i] > arr[i + 1]) {
@@ -23,64 +23,53 @@ void oddEvenSortSerial(int *arr, int n) {
     }
 }
 
-// ---------------- CUDA Global Memory Kernel ----------------
-__global__ void oddEvenGlobal(int *d_arr, int n, int phase) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int i = 2 * tid + (phase % 2);
-    if (i + 1 < n) {
-        if (d_arr[i] > d_arr[i + 1]) {
-            int tmp = d_arr[i];
-            d_arr[i] = d_arr[i + 1];
-            d_arr[i + 1] = tmp;
-        }
-    }
-}
-
-// ---------------- CUDA Shared Memory Kernel (Single Block) ----------------
-// Works only if N <= BLOCK_SIZE
-__global__ void oddEvenSharedSingleBlock(int *arr, int n) {
-    __shared__ int s_arr[N]; // Entire array in shared memory
+// ====================== CUDA Shared Memory Kernel (Debug) ======================
+__global__ void oddEvenSharedDebug(int *arr, int n) {
+    __shared__ int s_arr[BLOCK_SIZE * 2]; // Make large enough for your block slice
     int tid = threadIdx.x;
+    int globalStart = blockIdx.x * blockDim.x * 2; // Each block handles 2*BLOCK_SIZE elements
 
-    if (tid < n) s_arr[tid] = arr[tid];
+    // Copy block slice from global to shared memory
+    if (tid * 2 < n - globalStart) s_arr[tid * 2] = arr[globalStart + tid * 2];
+    if (tid * 2 + 1 < n - globalStart) s_arr[tid * 2 + 1] = arr[globalStart + tid * 2 + 1];
     __syncthreads();
 
-    for (int phase = 0; phase < n; ++phase) {
+    // Odd-even sort in shared memory (block-level)
+    for (int phase = 0; phase < BLOCK_SIZE * 2; phase++) {
         int i = 2 * tid + (phase % 2);
-        if (i + 1 < n) {
+        if (i + 1 < BLOCK_SIZE * 2 && i + globalStart + 1 < n) {
             if (s_arr[i] > s_arr[i + 1]) {
                 int tmp = s_arr[i];
                 s_arr[i] = s_arr[i + 1];
                 s_arr[i + 1] = tmp;
             }
         }
+        __syncthreads(); // Barrier to avoid race condition
+
+        // Debug: print the block after each phase
+        if (tid == 0) {
+            printf("Block %d after phase %d: ", blockIdx.x, phase);
+            for (int j = 0; j < BLOCK_SIZE * 2 && globalStart + j < n; j++) {
+                printf("%d ", s_arr[j]);
+            }
+            printf("\n");
+        }
         __syncthreads();
     }
 
-    if (tid < n) arr[tid] = s_arr[tid];
+    // Copy back to global memory
+    if (tid * 2 < n - globalStart) arr[globalStart + tid * 2] = s_arr[tid * 2];
+    if (tid * 2 + 1 < n - globalStart) arr[globalStart + tid * 2 + 1] = s_arr[tid * 2 + 1];
 }
 
-// ---------------- CUDA Multi-Block Kernel ----------------
-__global__ void oddEvenMultiBlock(int *d_arr, int n, int phase) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int i = 2 * tid + (phase % 2);
-    if (i + 1 < n) {
-        if (d_arr[i] > d_arr[i + 1]) {
-            int tmp = d_arr[i];
-            d_arr[i] = d_arr[i + 1];
-            d_arr[i + 1] = tmp;
-        }
-    }
-}
-
-// ---------------- Main ----------------
+// ====================== Main ======================
 int main() {
     int *h_arr = (int*)malloc(N * sizeof(int));
     int *h_serial = (int*)malloc(N * sizeof(int));
 
     srand(time(NULL));
     for (int i = 0; i < N; i++) {
-        h_arr[i] = rand() % 100; // Smaller range for easy verification
+        h_arr[i] = rand() % 100; // small numbers for easy reading
         h_serial[i] = h_arr[i];
     }
 
@@ -88,88 +77,32 @@ int main() {
     warmup<<<1,1>>>();
     cudaDeviceSynchronize();
 
-    // ---------------- Serial ----------------
-    clock_t start = clock();
+    // ------------------- Serial -------------------
     oddEvenSortSerial(h_serial, N);
-    clock_t end = clock();
-    double serialTime = 1000.0 * (end - start) / CLOCKS_PER_SEC;
+    printf("Serial sorted array:\n");
+    for (int i = 0; i < N; i++) printf("%d ", h_serial[i]);
+    printf("\n\n");
 
-    printf("Serial sorted first 16 elements:\n");
-    for (int i = 0; i < 16; i++) printf("%d ", h_serial[i]);
-    printf("\nSerial execution time: %f ms\n\n", serialTime);
-
-    // ---------------- CUDA Global Memory ----------------
+    // ------------------- CUDA Shared Memory Debug -------------------
     int *d_arr;
     cudaMalloc(&d_arr, N * sizeof(int));
     cudaMemcpy(d_arr, h_arr, N * sizeof(int), cudaMemcpyHostToDevice);
 
-    int numBlocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    cudaEvent_t startEvent, stopEvent;
-    float timeGlobal;
-    cudaEventCreate(&startEvent); cudaEventCreate(&stopEvent);
-    cudaEventRecord(startEvent);
-
-    for (int phase = 0; phase < N; phase++) {
-        oddEvenGlobal<<<numBlocks, BLOCK_SIZE>>>(d_arr, N, phase);
-        cudaDeviceSynchronize();
-    }
-
-    cudaEventRecord(stopEvent);
-    cudaEventSynchronize(stopEvent);
-    cudaEventElapsedTime(&timeGlobal, startEvent, stopEvent);
-
-    int *h_global = (int*)malloc(N * sizeof(int));
-    cudaMemcpy(h_global, d_arr, N * sizeof(int), cudaMemcpyDeviceToHost);
-
-    printf("CUDA Global sorted first 16 elements:\n");
-    for (int i = 0; i < 16; i++) printf("%d ", h_global[i]);
-    printf("\nCUDA Global execution time: %f ms\n\n", timeGlobal);
-
-    // ---------------- CUDA Shared Memory (Single Block) ----------------
-    cudaMemcpy(d_arr, h_arr, N * sizeof(int), cudaMemcpyHostToDevice);
-    float timeShared;
-    cudaEventRecord(startEvent);
-
-    oddEvenSharedSingleBlock<<<1, BLOCK_SIZE>>>(d_arr, N);
-
+    oddEvenSharedDebug<<<1, BLOCK_SIZE>>>(d_arr, N);
     cudaDeviceSynchronize();
-    cudaEventRecord(stopEvent);
-    cudaEventSynchronize(stopEvent);
-    cudaEventElapsedTime(&timeShared, startEvent, stopEvent);
 
     int *h_shared = (int*)malloc(N * sizeof(int));
     cudaMemcpy(h_shared, d_arr, N * sizeof(int), cudaMemcpyDeviceToHost);
 
-    printf("CUDA Shared (single-block) sorted first 16 elements:\n");
-    for (int i = 0; i < 16; i++) printf("%d ", h_shared[i]);
-    printf("\nCUDA Shared execution time: %f ms\n\n", timeShared);
+    printf("CUDA Shared sorted array:\n");
+    for (int i = 0; i < N; i++) printf("%d ", h_shared[i]);
+    printf("\n");
 
-    // ---------------- CUDA Multi-Block ----------------
-    cudaMemcpy(d_arr, h_arr, N * sizeof(int), cudaMemcpyHostToDevice);
-    float timeMulti;
-    cudaEventRecord(startEvent);
-
-    for (int phase = 0; phase < N; phase++) {
-        oddEvenMultiBlock<<<numBlocks, BLOCK_SIZE>>>(d_arr, N, phase);
-        cudaDeviceSynchronize();
-    }
-
-    cudaEventRecord(stopEvent);
-    cudaEventSynchronize(stopEvent);
-    cudaEventElapsedTime(&timeMulti, startEvent, stopEvent);
-
-    int *h_multi = (int*)malloc(N * sizeof(int));
-    cudaMemcpy(h_multi, d_arr, N * sizeof(int), cudaMemcpyDeviceToHost);
-
-    printf("CUDA Multi-block sorted first 16 elements:\n");
-    for (int i = 0; i < 16; i++) printf("%d ", h_multi[i]);
-    printf("\nCUDA Multi-block execution time: %f ms\n\n", timeMulti);
-
-    // ---------------- Cleanup ----------------
+    // Cleanup
     cudaFree(d_arr);
-    free(h_arr); free(h_serial);
-    free(h_global); free(h_shared); free(h_multi);
-    cudaEventDestroy(startEvent); cudaEventDestroy(stopEvent);
+    free(h_arr);
+    free(h_serial);
+    free(h_shared);
 
     return 0;
 }
