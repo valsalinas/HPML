@@ -95,6 +95,10 @@ int main() {
         h_serial[i] = h_arr[i];
     }
 
+    printf("Original array first 16 elements:\n");
+    for (int i = 0; i < 16; i++) printf("%d ", h_arr[i]);
+    printf("\n");
+
     // Warmup kernel
     warmup<<<1,1>>>();
     cudaDeviceSynchronize();
