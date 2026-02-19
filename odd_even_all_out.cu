@@ -83,22 +83,18 @@ int checkSorted(int *arr, int *ref, int n) {
 
 // ====================== Main ======================
 int main() {
-    // Array sizes and block sizes for testing
     int test_N[] = {32, 64, 128, 1024, 2048, 4096};
     int block_sizes[] = {32, 64, 128, 256};
 
-    printf("N,BLOCK,Serial(ms),Global(ms),Shared(ms),Speedup_Global,Speedup_Shared,GlobalCheck,SharedCheck\n");
+    printf("N,BLOCK,Serial(ms),GlobalSingle(ms),Shared(ms),GlobalMulti(ms),Speedup_GlobalSingle,Speedup_Shared,Speedup_GlobalMulti,GlobalSingleCheck,SharedCheck,GlobalMultiCheck\n");
 
     for (int ni = 0; ni < sizeof(test_N)/sizeof(int); ni++) {
         int N = test_N[ni];
 
         for (int bi = 0; bi < sizeof(block_sizes)/sizeof(int); bi++) {
             int BLOCK_SIZE = block_sizes[bi];
-
-            // Skip shared memory test if N > BLOCK_SIZE
             int shared_valid = (N <= BLOCK_SIZE) ? 1 : 0;
 
-            // Host arrays
             int *h_arr = (int*)malloc(N*sizeof(int));
             int *h_serial = (int*)malloc(N*sizeof(int));
 
@@ -114,33 +110,37 @@ int main() {
             clock_t end = clock();
             double serialTime = 1000.0*(end - start)/CLOCKS_PER_SEC;
 
-            // ------------------- CUDA Global Multi-block -------------------
+            // ------------------- Allocate device -------------------
             int *d_arr;
             cudaMalloc(&d_arr, N*sizeof(int));
-            cudaMemcpy(d_arr, h_arr, N*sizeof(int), cudaMemcpyHostToDevice);
-
-            int numBlocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
             cudaEvent_t startEvent, stopEvent;
-            float timeGlobal = 0;
             cudaEventCreate(&startEvent); cudaEventCreate(&stopEvent);
-            cudaEventRecord(startEvent);
 
-            for (int phase = 0; phase < N; phase++) {
-                oddEvenMultiBlock<<<numBlocks, BLOCK_SIZE>>>(d_arr, N, phase);
-                cudaDeviceSynchronize(); // host ensures inter-block sync
+            // ------------------- Global Memory Single-block -------------------
+            float timeGlobalSingle = -1.0f;
+            int globalSingleCheck = 0;
+
+            if (N <= BLOCK_SIZE) { // single-block valid
+                cudaMemcpy(d_arr, h_arr, N*sizeof(int), cudaMemcpyHostToDevice);
+
+                cudaEventRecord(startEvent);
+                for (int phase = 0; phase < N; phase++) {
+                    oddEvenGlobal<<<1, BLOCK_SIZE>>>(d_arr, N, phase);
+                    cudaDeviceSynchronize();
+                }
+                cudaEventRecord(stopEvent);
+                cudaEventSynchronize(stopEvent);
+                cudaEventElapsedTime(&timeGlobalSingle, startEvent, stopEvent);
+
+                int *h_globalSingle = (int*)malloc(N*sizeof(int));
+                cudaMemcpy(h_globalSingle, d_arr, N*sizeof(int), cudaMemcpyDeviceToHost);
+                globalSingleCheck = checkSorted(h_globalSingle, h_serial, N);
+                free(h_globalSingle);
             }
 
-            cudaEventRecord(stopEvent);
-            cudaEventSynchronize(stopEvent);
-            cudaEventElapsedTime(&timeGlobal, startEvent, stopEvent);
-
-            int *h_global = (int*)malloc(N*sizeof(int));
-            cudaMemcpy(h_global, d_arr, N*sizeof(int), cudaMemcpyDeviceToHost);
-            int globalCheck = checkSorted(h_global, h_serial, N);
-
-            // ------------------- CUDA Shared Memory -------------------
-            float timeShared = -1.0f; // N/A if not run
+            // ------------------- Shared Memory Single-block -------------------
+            float timeShared = -1.0f;
             int sharedCheck = 0;
             int *h_shared = NULL;
 
@@ -157,23 +157,59 @@ int main() {
                 h_shared = (int*)malloc(N*sizeof(int));
                 cudaMemcpy(h_shared, d_arr, N*sizeof(int), cudaMemcpyDeviceToHost);
                 sharedCheck = checkSorted(h_shared, h_serial, N);
+
+                free(h_shared);
             }
 
+            // ------------------- Global Memory Multi-block -------------------
+            int numBlocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            float timeGlobalMulti = -1.0f;
+            int globalMultiCheck = 0;
+
+            cudaMemcpy(d_arr, h_arr, N*sizeof(int), cudaMemcpyHostToDevice);
+            cudaEventRecord(startEvent);
+            for (int phase = 0; phase < N; phase++) {
+                oddEvenMultiBlock<<<numBlocks, BLOCK_SIZE>>>(d_arr, N, phase);
+                cudaDeviceSynchronize();
+            }
+            cudaEventRecord(stopEvent);
+            cudaEventSynchronize(stopEvent);
+            cudaEventElapsedTime(&timeGlobalMulti, startEvent, stopEvent);
+
+            int *h_globalMulti = (int*)malloc(N*sizeof(int));
+            cudaMemcpy(h_globalMulti, d_arr, N*sizeof(int), cudaMemcpyDeviceToHost);
+            globalMultiCheck = checkSorted(h_globalMulti, h_serial, N);
+            free(h_globalMulti);
+
             // ------------------- Output CSV -------------------
-            printf("%d,%d,%.3f,%.3f,", N, BLOCK_SIZE, serialTime, timeGlobal);
+            printf("%d,%d,%.3f,", N, BLOCK_SIZE, serialTime);
+
+            if (N <= BLOCK_SIZE) printf("%.3f,", timeGlobalSingle);
+            else printf("N/A,");
+
             if (shared_valid) printf("%.3f,", timeShared);
             else printf("N/A,");
-            printf("%.2f,", serialTime/timeGlobal);
+
+            printf("%.3f,", timeGlobalMulti);
+
+            if (N <= BLOCK_SIZE) printf("%.2f,", serialTime/timeGlobalSingle);
+            else printf("N/A,");
+
             if (shared_valid) printf("%.2f,", serialTime/timeShared);
             else printf("N/A,");
-            printf("%s,", globalCheck ? "PASS" : "FAIL");
-            if (shared_valid) printf("%s", sharedCheck ? "PASS" : "FAIL");
-            else printf("N/A");
-            printf("\n");
+
+            printf("%.2f,", serialTime/timeGlobalMulti);
+
+            if (N <= BLOCK_SIZE) printf("%s,", globalSingleCheck ? "PASS" : "FAIL");
+            else printf("N/A,");
+
+            if (shared_valid) printf("%s,", sharedCheck ? "PASS" : "FAIL");
+            else printf("N/A,");
+
+            printf("%s\n", globalMultiCheck ? "PASS" : "FAIL");
 
             // ------------------- Cleanup -------------------
-            free(h_arr); free(h_serial); free(h_global);
-            if (shared_valid) free(h_shared);
+            free(h_arr); free(h_serial);
             cudaFree(d_arr);
             cudaEventDestroy(startEvent); cudaEventDestroy(stopEvent);
         }

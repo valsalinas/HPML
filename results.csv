@@ -1,0 +1,6 @@
+N,BLOCK,Serial(ms),Global(ms),Shared(ms),Speedup_Global,Speedup_Shared,GlobalCheck,SharedCheck
+32,32,0.014,0.293,0.021,0.05,0.68,PASS,PASS
+32,64,0.005,0.184,0.009,0.03,0.56,PASS,PASS
+128,128,0.041,0.672,0.015,0.06,2.80,PASS,PASS
+1024,64,2.079,5.255,N/A,0.40,N/A,PASS,N/A
+...
