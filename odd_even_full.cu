@@ -35,7 +35,7 @@ __global__ void oddEvenGlobal(int *arr, int n, int phase) {
 
 // --- CUDA: Shared Memory Kernel (Single Block) ---
 __global__ void oddEvenSharedSingleBlock(int *arr, int n, int phase) {
-    __shared__ int tile[1024]; // max array size for single block
+    __shared__ int tile[1024]; // only works if N <= blockDim.x
     int tid = threadIdx.x;
     if(tid < n) tile[tid] = arr[tid];
     __syncthreads();
@@ -56,15 +56,15 @@ __global__ void oddEvenSharedSingleBlock(int *arr, int n, int phase) {
 // --- CUDA: Shared Memory Kernel (Multi-Block Tiling) ---
 __global__ void oddEvenSharedMultiBlock(int *arr, int n, int phase) {
     __shared__ int tile[256]; // tile size = BLOCK_SIZE
-    int blockStart = blockIdx.x * blockDim.x;
     int tid = threadIdx.x;
+    int blockStart = blockIdx.x * blockDim.x;
     int globalIdx = blockStart + tid;
 
     if(globalIdx < n) tile[tid] = arr[globalIdx];
     __syncthreads();
 
     int start = phase % 2;
-    for(int i = start + tid; i < blockDim.x - 1 && (blockStart + i + 1) < n; i += blockDim.x * 2) {
+    for(int i = start + tid; i < blockDim.x-1 && (blockStart + i + 1) < n; i += blockDim.x * 2) {
         if(tile[i] > tile[i+1]) {
             int tmp = tile[i];
             tile[i] = tile[i+1];
@@ -87,6 +87,8 @@ int main() {
     int h_arr[N], h_arr_serial[N];
     int *d_arr;
     srand(time(NULL));
+
+    // Initialize arrays
     for(int i = 0; i < N; i++) {
         h_arr[i] = rand() % 100;
         h_arr_serial[i] = h_arr[i];
@@ -142,7 +144,7 @@ int main() {
             printf("CUDA Shared execution time: %f ms\n\n", 1000.0 * (end-start)/CLOCKS_PER_SEC);
         }
 
-        // --- CUDA Shared Memory Multi-Block ---
+        // --- CUDA Shared Memory Multi-Block (for N > BLOCK_SIZE) ---
         cudaMemcpy(d_arr, h_arr, N*sizeof(int), cudaMemcpyHostToDevice);
         start = clock();
         for(int phase=0; phase<N; phase++) {
@@ -156,12 +158,7 @@ int main() {
         printf("CUDA Shared Multi-block execution time: %f ms\n\n", 1000.0 * (end-start)/CLOCKS_PER_SEC);
     }
 
-    // Free GPU memory
     cudaFree(d_arr);
-
-    // --- NOTE: no free() for stack arrays ---
-    // free(h_arr);
-    // free(h_arr_serial);
 
     return 0;
 }
