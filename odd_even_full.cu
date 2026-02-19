@@ -156,9 +156,12 @@ int main() {
         printf("CUDA Shared Multi-block execution time: %f ms\n\n", 1000.0 * (end-start)/CLOCKS_PER_SEC);
     }
 
+    // Free GPU memory
     cudaFree(d_arr);
-    free(h_arr);
-    free(h_arr_serial);
+
+    // --- NOTE: no free() for stack arrays ---
+    // free(h_arr);
+    // free(h_arr_serial);
 
     return 0;
 }
