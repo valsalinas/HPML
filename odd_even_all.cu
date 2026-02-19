@@ -2,8 +2,13 @@
 #include <stdlib.h>
 #include <cuda_runtime.h>
 #include <time.h>
+#include <math.h>
 
-#define MAX_BLOCK_SIZE 256
+#define MAX_N 4096
+#define MAX_BLOCK 256
+
+// Warmup kernel
+__global__ void warmup() {}
 
 // ====================== Serial Odd-Even Sort ======================
 void oddEvenSortSerial(int *arr, int n) {
@@ -20,7 +25,7 @@ void oddEvenSortSerial(int *arr, int n) {
 }
 
 // ====================== CUDA Global Memory Kernel ======================
-__global__ void oddEvenMultiBlock(int *d_arr, int n, int phase) {
+__global__ void oddEvenGlobal(int *d_arr, int n, int phase) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int i = 2 * tid + (phase % 2);
     if (i + 1 < n) {
@@ -34,9 +39,9 @@ __global__ void oddEvenMultiBlock(int *d_arr, int n, int phase) {
 
 // ====================== CUDA Shared Memory Kernel (single-block) ======================
 __global__ void oddEvenShared(int *d_arr, int n) {
-    __shared__ int s_arr[MAX_BLOCK_SIZE];
-    int tid = threadIdx.x;
+    extern __shared__ int s_arr[];
 
+    int tid = threadIdx.x;
     if (tid < n) s_arr[tid] = d_arr[tid];
     __syncthreads();
 
@@ -55,44 +60,79 @@ __global__ void oddEvenShared(int *d_arr, int n) {
     if (tid < n) d_arr[tid] = s_arr[tid];
 }
 
+// ====================== Multi-block Kernel ======================
+__global__ void oddEvenMultiBlock(int *d_arr, int n, int phase) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = 2 * tid + (phase % 2);
+    if (i + 1 < n) {
+        if (d_arr[i] > d_arr[i + 1]) {
+            int tmp = d_arr[i];
+            d_arr[i] = d_arr[i + 1];
+            d_arr[i + 1] = tmp;
+        }
+    }
+}
+
+// ====================== Correctness Check ======================
+int checkSorted(int *arr, int *ref, int n) {
+    for (int i = 0; i < n; ++i) {
+        if (arr[i] != ref[i]) return 0;
+    }
+    return 1;
+}
+
 // ====================== Main ======================
 int main() {
-    int sizes[] = {1024, 2048, 4096};
-    int blockSizes[] = {64, 128, 256};
-    int numSizes = sizeof(sizes)/sizeof(sizes[0]);
-    int numBlockSizes = sizeof(blockSizes)/sizeof(blockSizes[0]);
+    int test_N[] = {32, 64, 128, 1024, 2048, 4096};
+    int block_sizes[] = {32, 64, 128, 256};
 
-    printf("N\tBLOCK\tSerial(ms)\tGlobal(ms)\tShared(ms)\tSpeedup_Global\tSpeedup_Shared\tGlobalCheck\tSharedCheck\n");
+    printf("N,BLOCK,Serial(ms),Global(ms),Shared(ms),Speedup_Global,Speedup_Shared,GlobalCheck,SharedCheck\n");
 
-    for (int s = 0; s < numSizes; s++) {
-        int N = sizes[s];
+    for (int ni = 0; ni < sizeof(test_N)/sizeof(int); ni++) {
+        int N = test_N[ni];
 
-        int *h_arr = (int*)malloc(N * sizeof(int));
-        int *h_serial = (int*)malloc(N * sizeof(int));
-        srand(time(NULL));
-        for (int i = 0; i < N; i++) {
-            h_arr[i] = rand() % 1000;
-            h_serial[i] = h_arr[i];
-        }
+        for (int bi = 0; bi < sizeof(block_sizes)/sizeof(int); bi++) {
+            int BLOCK_SIZE = block_sizes[bi];
+            int shared_valid = (N <= BLOCK_SIZE) ? 1 : 0;
 
-        // ---- Serial sort ----
-        clock_t start = clock();
-        oddEvenSortSerial(h_serial, N);
-        clock_t end = clock();
-        double serialTime = 1000.0 * (end - start) / CLOCKS_PER_SEC;
+            int *h_arr = (int*)malloc(N*sizeof(int));
+            int *h_serial = (int*)malloc(N*sizeof(int));
 
-        for (int b = 0; b < numBlockSizes; b++) {
-            int BLOCK_SIZE = blockSizes[b];
+            srand(time(NULL));
+            for (int i = 0; i < N; i++) {
+                h_arr[i] = rand() % 100;
+                h_serial[i] = h_arr[i];
+            }
+
+            // ------------------- Print small arrays for verification -------------------
+            if (N <= 32) {
+                printf("\nOriginal array (N=%d): ", N);
+                for (int i=0;i<N;i++) printf("%d ", h_arr[i]);
+                printf("\n");
+            }
+
+            // ------------------- Serial -------------------
+            clock_t start = clock();
+            oddEvenSortSerial(h_serial, N);
+            clock_t end = clock();
+            double serialTime = 1000.0*(end - start)/CLOCKS_PER_SEC;
+
+            if (N <= 32) {
+                printf("Serial sorted: ");
+                for (int i=0;i<N;i++) printf("%d ", h_serial[i]);
+                printf("\n");
+            }
+
+            // ------------------- CUDA Global Multi-block -------------------
+            int *d_arr;
+            cudaMalloc(&d_arr, N*sizeof(int));
+            cudaMemcpy(d_arr, h_arr, N*sizeof(int), cudaMemcpyHostToDevice);
+
             int numBlocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-            int *d_arr;
-            cudaMalloc(&d_arr, N * sizeof(int));
-            cudaMemcpy(d_arr, h_arr, N * sizeof(int), cudaMemcpyHostToDevice);
-
-            // ---- Multi-block global ----
             cudaEvent_t startEvent, stopEvent;
-            cudaEventCreate(&startEvent);
-            cudaEventCreate(&stopEvent);
+            float timeGlobal = 0;
+            cudaEventCreate(&startEvent); cudaEventCreate(&stopEvent);
             cudaEventRecord(startEvent);
 
             for (int phase = 0; phase < N; phase++) {
@@ -102,57 +142,56 @@ int main() {
 
             cudaEventRecord(stopEvent);
             cudaEventSynchronize(stopEvent);
-            float timeGlobal;
             cudaEventElapsedTime(&timeGlobal, startEvent, stopEvent);
 
-            int *h_global = (int*)malloc(N * sizeof(int));
-            cudaMemcpy(h_global, d_arr, N * sizeof(int), cudaMemcpyDeviceToHost);
+            int *h_global = (int*)malloc(N*sizeof(int));
+            cudaMemcpy(h_global, d_arr, N*sizeof(int), cudaMemcpyDeviceToHost);
+            int globalCheck = checkSorted(h_global, h_serial, N);
 
-            int passGlobal = 1;
-            for (int i = 0; i < N; i++) if (h_serial[i] != h_global[i]) passGlobal = 0;
+            // ------------------- CUDA Shared Memory -------------------
+            float timeShared = -1.0f;
+            int sharedCheck = 0;
+            int *h_shared = NULL;
 
-            // ---- Shared memory (single-block) ----
-            float timeShared = -1.0;
-            int passShared = -1;
-            if (N <= BLOCK_SIZE && N <= MAX_BLOCK_SIZE) {
-                cudaMemcpy(d_arr, h_arr, N * sizeof(int), cudaMemcpyHostToDevice);
+            if (shared_valid) {
+                cudaMemcpy(d_arr, h_arr, N*sizeof(int), cudaMemcpyHostToDevice);
 
                 cudaEventRecord(startEvent);
-                oddEvenShared<<<1, BLOCK_SIZE>>>(d_arr, N);
+                oddEvenShared<<<1, BLOCK_SIZE, BLOCK_SIZE*sizeof(int)>>>(d_arr, N);
                 cudaDeviceSynchronize();
                 cudaEventRecord(stopEvent);
                 cudaEventSynchronize(stopEvent);
                 cudaEventElapsedTime(&timeShared, startEvent, stopEvent);
 
-                int *h_shared = (int*)malloc(N * sizeof(int));
-                cudaMemcpy(h_shared, d_arr, N * sizeof(int), cudaMemcpyDeviceToHost);
+                h_shared = (int*)malloc(N*sizeof(int));
+                cudaMemcpy(h_shared, d_arr, N*sizeof(int), cudaMemcpyDeviceToHost);
+                sharedCheck = checkSorted(h_shared, h_serial, N);
 
-                passShared = 1;
-                for (int i = 0; i < N; i++) if (h_serial[i] != h_shared[i]) passShared = 0;
-
-                free(h_shared);
+                if (N <= 32) {
+                    printf("Shared sorted: ");
+                    for (int i=0;i<N;i++) printf("%d ", h_shared[i]);
+                    printf("\n");
+                }
             }
 
-            // ---- Print results ----
-            printf("%d\t%d\t%.3f\t\t%.3f\t\t", N, BLOCK_SIZE, serialTime, timeGlobal);
-            if (timeShared > 0) printf("%.3f\t\t", timeShared);
-            else printf("N/A\t\t");
-            printf("%.2f\t\t", serialTime / timeGlobal);
-            if (timeShared > 0) printf("%.2f\t\t", serialTime / timeShared);
-            else printf("N/A\t\t");
-            printf("%s\t\t", passGlobal ? "PASS" : "FAIL");
-            if (timeShared > 0) printf("%s", passShared ? "PASS" : "FAIL");
+            // ------------------- Output CSV -------------------
+            printf("%d,%d,%.3f,%.3f,", N, BLOCK_SIZE, serialTime, timeGlobal);
+            if (shared_valid) printf("%.3f,", timeShared);
+            else printf("N/A,");
+            printf("%.2f,", serialTime/timeGlobal);
+            if (shared_valid) printf("%.2f,", serialTime/timeShared);
+            else printf("N/A,");
+            printf("%s,", globalCheck ? "PASS" : "FAIL");
+            if (shared_valid) printf("%s", sharedCheck ? "PASS" : "FAIL");
             else printf("N/A");
             printf("\n");
 
+            // ------------------- Cleanup -------------------
+            free(h_arr); free(h_serial); free(h_global);
+            if (shared_valid) free(h_shared);
             cudaFree(d_arr);
-            free(h_global);
-            cudaEventDestroy(startEvent);
-            cudaEventDestroy(stopEvent);
+            cudaEventDestroy(startEvent); cudaEventDestroy(stopEvent);
         }
-
-        free(h_arr);
-        free(h_serial);
     }
 
     return 0;
