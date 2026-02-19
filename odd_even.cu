@@ -71,7 +71,7 @@ int main() {
     int test_N[] = {32, 64, 128, 1024, 2048, 4096};
     int block_sizes[] = {32, 64, 128, 256};
 
-    printf("N,BLOCK,Serial(ms),GlobalSingle(ms),Shared(ms),GlobalMulti(ms),");
+    printf("N,BLOCK,Serial,GlobalSingle,Shared,GlobalMulti,");
     printf("Speedup_GlobalSingle,Speedup_Shared,Speedup_GlobalMulti,");
     printf("GlobalSingleCheck,SharedCheck,GlobalMultiCheck\n");
 

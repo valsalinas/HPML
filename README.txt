@@ -4,7 +4,6 @@ To compile the program:
 
 nvcc -o odd_even.cu odd_even
 
-
 This creates an executable file called odd_even.
 
 Run Instructions:
@@ -12,7 +11,6 @@ Run Instructions:
 To run the program:
 
 ./odd_even
-
 
 The program automatically runs the odd_even sort for different:
 
